@@ -1,0 +1,4 @@
+data/*
+other/*
+__pycache/*
+!data/.gitkeep
