@@ -5,9 +5,11 @@ import json
 from sklearn.cluster import DBSCAN, KMeans, OPTICS
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
+from scipy.spatial import distance
 import matplotlib.pyplot as plt
-# Cluster these 300D vectors into 10 groups?
-# Do clusters seem to contain similar words?
+import matplotlib.colors as plt_colors
+from collections import defaultdict
+# Cluster vectors using a few algorithms
 
 # Word vectors from fastText (2M words, 300 dimensions)
 # Two approaches for training word representations:
@@ -43,73 +45,77 @@ def load_subset(fname):
     return data
 
 
-def distance(vec1, vec2):
+def euclidean_distance(vec1, vec2):
     diff = np.array(vec1) - np.array(vec2)
     return np.sqrt(np.sum([d**2 for d in diff]))
 
-
 def compare(data, word1, word2):
-    dist = distance(data[word1], data[word2])
-    print(f'Distance from {word1} to {word2}: {dist:.2f}')
+    dist = euclidean_distance(data[word1], data[word2])
+    cosine_dist = distance.cosine(data[word1], data[word2])
+    print(f'Distance from {word1} to {word2}: {dist:.2f} (Euclidean) {cosine_dist:.2f} (Cosine)')
 
 
 def cluster(x, method='kmeans', **kwargs):
     # Density based clustering
+    metric = kwargs['metric'] if 'metric' in kwargs else 'euclidean'
     if method == 'OPTICS':
         # Improved DBSCAN (outward radiating from highly-dense cores, faster, scans over eps)
-        clustering = OPTICS(min_samples=kwargs['min_samples']).fit(X)
+        clustering = OPTICS(min_samples=kwargs['min_samples'], metric=metric).fit(X)
     elif method == 'DBSCAN':
          # Worst-case O(n^2), eps = neighborhood radius
-        clustering = DBSCAN(eps=kwargs['eps']).fit(X)  # 7).fit(X)
+        clustering = DBSCAN(eps=kwargs['eps'], metric=metric).fit(X)  
     else:
         # Partition-based clustering
-        clustering = KMeans(
-            n_clusters=kwargs['n_clusters'], random_state=0).fit(X)  # 10
+        clustering = KMeans(n_clusters=kwargs['n_clusters'], random_state=0, metric=metric).fit(X)  
 
     # Number of elements in model's clusters:
-    print(f"Clustering with {method}")
-    print(np.unique(clustering.labels_, return_counts=True))
+    print(f"Clustering with {method} (metric: {metric.capitalize()})")
+    print(list(zip(*np.unique(clustering.labels_, return_counts=True))))
     return clustering.labels_.tolist()
 
 
-def plot_word_embeddings(X, words, reduction_method='TSNE'):
+def plot_word_embeddings(X, words, reduction_method='TSNE', clusters = None):
     # Reduce dimensionality to 2D to visualize
-    # PCA favors preserving global structure, is a linear
-    # dimensionality reduction technique.
+    # PCA favors preserving global structure, a linear dimensionality
+    # reduction technique.
     # TSNE  is non-linear and tries to preserve local neighborhoods.
     # It seems to group similar words tighter and overall "looks better".
     if reduction_method == 'TSNE':
         x = TSNE(n_components=2).fit_transform(X)
     else:
         x = PCA(n_components=2).fit_transform(X)
+    clusters = clusters if clusters is not None else [0 for i in range(words)]
 
     fig, ax = plt.subplots()
-    ax.scatter([x_i[0] for x_i in x], [x_i[1] for x_i in x])
-    for i, txt in enumerate(words):
-        ax.annotate(txt, (x[i][0], x[i][1]))
-    plt.show()
+    colors = list(plt_colors.cnames.keys())
+    np.random.shuffle(colors)
+    for i, (x_i, word) in enumerate(zip(x, words)):
+        if clusters[i] != -1:
+            ax.scatter(x_i[0], x_i[1], color = colors[clusters[i]])
+            ax.annotate(word, (x[i][0], x[i][1]))
+    return x
 
 
 if __name__ == "__main__":
 
     if len(sys.argv) > 1:
-        # Load word vectors then save to a dict, limiting to
-        # 1/4 for memory
+        # Load word vectors then save to a dict
         data = load_vectors('data/crawl-300d-2M.vec', limit=500000)
         save_to_json(data, 'data/wordvecs.json')
         sys.exit(0)
-    # After creating wordvecs.json, with {word: embedding, ...}
+    
+    # After creating wordvecs.json, {word: embedding, ...}
     data = load_subset('data/wordvecs.json')
     vals = list(data.values())
 
     print(f'{len(data)} words loaded')
     print(f'Words: {str(list(data.keys())[:5])[:-1]}, ... {str(list(data.keys())[-5:])[1:]}')
-    # Compute L2 distance between words
+    # Compute L2 distance and cosine similarity for some examples
     compare(data, 'refer', 'referring')
     compare(data, 'refering', 'referring')
     compare(data, 'refer', 'Karo')
-    compare(data, 'refer', '.')
     compare(data, 'man', 'woman')
+    compare(data, 'king', 'queen')
 
     n = 1000
     print(f"Grabbing {n} words and embeddings")
@@ -117,23 +123,29 @@ if __name__ == "__main__":
     X = np.array(vals[:n])
 
     print("Clustering...")
-    cluster_labels = cluster(X, n_clusters=10)
-    cluster_labels = cluster(X, method='DBSCAN', eps=7)
-    cluster_labels = cluster(X, method='OPTICS', min_samples=int(n/200))
-
+    # Euclidean vs Cosine similarity...
+    cluster_labels_euc = cluster(X, method='OPTICS', min_samples=int(n/200))
+    for k in np.unique(cluster_labels_euc):
+        if k != -1:
+            print(f"Cluster {k}: {[words[i] for i in range(len(words)) if cluster_labels_euc[i] == k]}")
+    
+    cluster_labels = cluster(X, method='OPTICS', min_samples=int(n/200), metric='cosine')
+    for k in np.unique(cluster_labels):
+        if k != -1:
+            print(f"Cluster {k}: {[words[i] for i in range(len(words)) if cluster_labels[i] == k]}")
 
     # Save clusters
     data_clusters = list(zip(words, cluster_labels))
     save_to_json(data_clusters, 'data/1000_word_clusters_optics.json')
 
-    for k in np.unique(cluster_labels):
-        if k == -1:
-            continue
-        print(f"Cluster {k}: {[words[i] for i in range(len(words)) if cluster_labels[i] == k]}")
-    
 
-    # Plotting word_embeddings using dimensionality reduction
+    # Plot clusters of words in 2D using TSNE
     print("Plotting...")
-    plot_word_embeddings(X, words, 'TSNE')
+    x_reduced = plot_word_embeddings(X, words, 'TSNE', clusters = cluster_labels)
+    x_reduced = plot_word_embeddings(X, words, 'TSNE', clusters = cluster_labels_euc)
+    plt.show()
 
-    # AND multiple clusters, i.e. vote from multiple models...
+
+    # TODO
+    # Plot clusters as bubbles with radius ~ num words, center centroid (2D representation)
+    # Maybe use the most representative word as the bubble label
